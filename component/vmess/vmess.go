@@ -65,9 +65,10 @@ type DstAddr struct {
 
 // Client is vmess connection generator
 type Client struct {
-	user     []*ID
-	uuid     *uuid.UUID
-	security Security
+	user       []*ID
+	uuid       *uuid.UUID
+	security   Security
+	enableAEAD bool
 }
 
 // Config of vmess
@@ -82,7 +83,7 @@ type Config struct {
 // StreamConn return a Conn with net.Conn and DstAddr
 func (c *Client) StreamConn(conn net.Conn, dst *DstAddr) (net.Conn, error) {
 	r := rand.Intn(len(c.user))
-	return newConn(conn, c.user[r], dst, c.security)
+	return newConn(conn, c.user[r], dst, c.security, c.enableAEAD)
 }
 
 // NewClient return Client instance
@@ -109,9 +110,21 @@ func NewClient(config Config) (*Client, error) {
 		return nil, fmt.Errorf("Unknown security type: %s", config.Security)
 	}
 
+	var users []*ID
+	var enabledAEAD bool
+	primaryID := newID(&uid)
+
+	if config.AlterID == 0 { // when alterid is 0, enable AEAD
+		users = []*ID{primaryID}
+		enabledAEAD = true
+	} else {
+		users = newAlterIDs(primaryID, config.AlterID)
+	}
+
 	return &Client{
-		user:     newAlterIDs(newID(&uid), config.AlterID),
-		uuid:     &uid,
-		security: security,
+		user:       users,
+		uuid:       &uid,
+		security:   security,
+		enableAEAD: enabledAEAD,
 	}, nil
 }
