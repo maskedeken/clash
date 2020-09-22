@@ -13,15 +13,6 @@ import (
 	C "github.com/Dreamacro/clash/constant"
 )
 
-var addrParser = func(network C.NetWork) byte {
-	command := trojan.CommandTCP
-	if network == C.UDP {
-		command = trojan.CommandUDP
-	}
-
-	return command
-}
-
 type Trojan struct {
 	*Base
 	instance *trojan.Trojan
