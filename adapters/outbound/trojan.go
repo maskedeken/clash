@@ -154,18 +154,8 @@ func NewTrojan(option TrojanOption) (*Trojan, error) {
 	}
 
 	var muxClient *mux.Client
-	if option.Mux.Enabled { // enable mux
-		concurrency := 8
-		if option.Mux.Concurrency > 0 {
-			concurrency = option.Mux.Concurrency
-		}
-
-		idleTimeout := 30
-		if option.Mux.IdleTimeout > 0 {
-			idleTimeout = option.Mux.IdleTimeout
-		}
-
-		muxClient, _ = mux.NewClient(mux.Config{Concurrency: concurrency, IdleTimeout: idleTimeout})
+	if option.Mux.Concurrency > 0 { // enable mux
+		muxClient, _ = mux.NewClient(mux.Config{Concurrency: option.Mux.Concurrency, IdleTimeout: 30})
 	}
 
 	return &Trojan{
