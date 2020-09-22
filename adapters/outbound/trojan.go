@@ -8,13 +8,25 @@ import (
 	"strconv"
 
 	"github.com/Dreamacro/clash/component/dialer"
+	"github.com/Dreamacro/clash/component/mux"
+	"github.com/Dreamacro/clash/component/simplesocks"
 	"github.com/Dreamacro/clash/component/trojan"
 	C "github.com/Dreamacro/clash/constant"
 )
 
+var addrParser = func(network C.NetWork) byte {
+	command := trojan.CommandTCP
+	if network == C.UDP {
+		command = trojan.CommandUDP
+	}
+
+	return command
+}
+
 type Trojan struct {
 	*Base
 	instance *trojan.Trojan
+	mux      *mux.Client
 }
 
 type TrojanOption struct {
@@ -26,6 +38,7 @@ type TrojanOption struct {
 	SNI            string   `proxy:"sni,omitempty"`
 	SkipCertVerify bool     `proxy:"skip-cert-verify,omitempty"`
 	UDP            bool     `proxy:"udp,omitempty"`
+	Mux            Mux      `proxy:"mux,omitempty"`
 }
 
 func (t *Trojan) StreamConn(c net.Conn, metadata *C.Metadata) (net.Conn, error) {
@@ -38,7 +51,40 @@ func (t *Trojan) StreamConn(c net.Conn, metadata *C.Metadata) (net.Conn, error) 
 	return c, err
 }
 
+func (t *Trojan) dialMux(ctx context.Context, metadata *C.Metadata) (net.Conn, error) {
+	dialer := func() (net.Conn, error) {
+		c, err := dialer.DialContext(ctx, "tcp", t.addr)
+		if err != nil {
+			return nil, fmt.Errorf("%s connect error: %w", t.addr, err)
+		}
+		tcpKeepAlive(c)
+		c, err = t.instance.StreamConn(c)
+		if err != nil {
+			return nil, fmt.Errorf("%s connect error: %w", t.addr, err)
+		}
+
+		err = t.instance.WriteHeader(c, trojan.CommandMUX, serializesSocksAddr(metadata))
+		if err != nil {
+			return nil, err
+		}
+
+		return c, nil
+	}
+
+	return t.mux.NewMuxConn(dialer)
+
+}
+
 func (t *Trojan) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, error) {
+	if t.mux != nil {
+		c, err := t.dialMux(ctx, metadata)
+		if err != nil {
+			return nil, err
+		}
+
+		return NewConn(simplesocks.NewConn(c, metadata, addrParser, serializesSocksAddr), t), nil
+	}
+
 	c, err := dialer.DialContext(ctx, "tcp", t.addr)
 	if err != nil {
 		return nil, fmt.Errorf("%s connect error: %w", t.addr, err)
@@ -55,6 +101,17 @@ func (t *Trojan) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn,
 func (t *Trojan) DialUDP(metadata *C.Metadata) (C.PacketConn, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), tcpTimeout)
 	defer cancel()
+
+	if t.mux != nil {
+		c, err := t.dialMux(ctx, metadata)
+		if err != nil {
+			return nil, err
+		}
+
+		pc := t.instance.PacketConn(simplesocks.NewConn(c, metadata, addrParser, serializesSocksAddr))
+		return newPacketConn(pc, t), err
+	}
+
 	c, err := dialer.DialContext(ctx, "tcp", t.addr)
 	if err != nil {
 		return nil, fmt.Errorf("%s connect error: %w", t.addr, err)
@@ -95,6 +152,21 @@ func NewTrojan(option TrojanOption) (*Trojan, error) {
 		tOption.ServerName = option.SNI
 	}
 
+	var muxClient *mux.Client
+	if option.Mux.Enabled { // enable mux
+		concurrency := 8
+		if option.Mux.Concurrency > 0 {
+			concurrency = option.Mux.Concurrency
+		}
+
+		idleTimeout := 30
+		if option.Mux.IdleTimeout > 0 {
+			idleTimeout = option.Mux.IdleTimeout
+		}
+
+		muxClient, _ = mux.NewClient(mux.Config{Concurrency: concurrency, IdleTimeout: idleTimeout})
+	}
+
 	return &Trojan{
 		Base: &Base{
 			name: option.Name,
@@ -103,5 +175,6 @@ func NewTrojan(option TrojanOption) (*Trojan, error) {
 			udp:  option.UDP,
 		},
 		instance: trojan.New(tOption),
+		mux:      muxClient,
 	}, nil
 }

@@ -31,6 +31,7 @@ type Command = byte
 var (
 	CommandTCP byte = 1
 	CommandUDP byte = 3
+	CommandMUX byte = 0x7f
 )
 
 type Option struct {
