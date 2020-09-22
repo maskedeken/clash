@@ -56,7 +56,7 @@ func NewClient(config Config) (*Client, error) {
 
 func (c *Client) NewMuxConn(dialer func() (net.Conn, error)) (net.Conn, error) {
 	createNewConn := func(info *smuxClientInfo) (net.Conn, error) {
-		rwc, err := info.client.Open()
+		stream, err := info.client.OpenStream()
 		info.lastActiveTime = time.Now()
 		if err != nil {
 			info.underlayConn.Close()
@@ -65,7 +65,7 @@ func (c *Client) NewMuxConn(dialer func() (net.Conn, error)) (net.Conn, error) {
 			return nil, err
 		}
 
-		return &Conn{rwc: rwc, Conn: info.underlayConn}, nil
+		return stream, nil
 	}
 
 	c.Lock()
@@ -89,11 +89,6 @@ func (c *Client) NewMuxConn(dialer func() (net.Conn, error)) (net.Conn, error) {
 
 func (c *Client) Close() error {
 	c.cancel()
-	c.Lock()
-	defer c.Unlock()
-	for _, info := range c.clientPool {
-		info.client.Close()
-	}
 	return nil
 }
 
@@ -106,7 +101,7 @@ func (c *Client) newMuxClient(dialer func() (net.Conn, error)) (*smuxClientInfo,
 
 	conn, err := dialer()
 	if err != nil {
-		return nil, errors.New("mux failed to dial")
+		return nil, err
 	}
 
 	smuxConfig := smux.DefaultConfig()
