@@ -9,7 +9,6 @@ import (
 
 	"github.com/Dreamacro/clash/component/dialer"
 	"github.com/Dreamacro/clash/component/mux"
-	"github.com/Dreamacro/clash/component/simplesocks"
 	"github.com/Dreamacro/clash/component/trojan"
 	C "github.com/Dreamacro/clash/constant"
 )
@@ -82,7 +81,9 @@ func (t *Trojan) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn,
 			return nil, err
 		}
 
-		return NewConn(simplesocks.NewConn(c, metadata, addrParser, serializesSocksAddr), t), nil
+		return NewConn(&SimpleSocksConn{Conn: c,
+			Metadata: metadata,
+		}, t), nil
 	}
 
 	c, err := dialer.DialContext(ctx, "tcp", t.addr)
@@ -108,7 +109,7 @@ func (t *Trojan) DialUDP(metadata *C.Metadata) (C.PacketConn, error) {
 			return nil, err
 		}
 
-		pc := t.instance.PacketConn(simplesocks.NewConn(c, metadata, addrParser, serializesSocksAddr))
+		pc := t.instance.PacketConn(&SimpleSocksConn{Conn: c, Metadata: metadata})
 		return newPacketConn(pc, t), err
 	}
 
