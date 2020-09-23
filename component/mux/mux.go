@@ -9,6 +9,7 @@ import (
 	"time"
 
 	C "github.com/Dreamacro/clash/constant"
+	"github.com/Dreamacro/clash/log"
 	"github.com/xtaci/smux"
 )
 
@@ -75,6 +76,7 @@ func (c *Client) DialConn(ctx context.Context, metadata *C.Metadata) (net.Conn, 
 			return nil, err
 		}
 
+		log.Debugln("[MUX] create connection to %s", metadata.RemoteAddress())
 		return stream, nil
 	}
 
