@@ -28,11 +28,7 @@ type TrojanOption struct {
 	SNI            string   `proxy:"sni,omitempty"`
 	SkipCertVerify bool     `proxy:"skip-cert-verify,omitempty"`
 	UDP            bool     `proxy:"udp,omitempty"`
-	Mux            Mux      `proxy:"mux,omitempty"`
-}
-
-type Mux struct {
-	Concurrency int `proxy:"concurrency"`
+	Mux            int      `proxy:"mux,omitempty"`
 }
 
 func (t *Trojan) StreamConn(c net.Conn, metadata *C.Metadata) (net.Conn, error) {
@@ -134,8 +130,8 @@ func NewTrojan(option TrojanOption) (*Trojan, error) {
 		instance: trojan.New(tOption),
 	}
 
-	if option.Mux.Concurrency > 0 { // enable mux
-		muxClient, _ := mux.NewClient(mux.Config{Concurrency: option.Mux.Concurrency, IdleTimeout: 30}, func(ctx context.Context, metadata *C.Metadata) (net.Conn, error) {
+	if option.Mux > 0 { // enable mux
+		muxClient, _ := mux.NewClient(mux.Config{Concurrency: option.Mux, IdleTimeout: 30}, func(ctx context.Context, metadata *C.Metadata) (net.Conn, error) {
 			c, err := dialer.DialContext(ctx, "tcp", t.addr)
 			if err != nil {
 				return nil, fmt.Errorf("%s connect error: %w", t.addr, err)
