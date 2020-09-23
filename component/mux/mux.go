@@ -8,10 +8,18 @@ import (
 	"sync"
 	"time"
 
+	C "github.com/Dreamacro/clash/constant"
 	"github.com/xtaci/smux"
 )
 
+var (
+	clients []*Client
+	once    sync.Once
+)
+
 type muxID uint32
+
+type dialer func(context.Context, *C.Metadata) (net.Conn, error)
 
 func generateMuxID() muxID {
 	return muxID(rand.Uint32())
@@ -30,8 +38,7 @@ type Client struct {
 	clientPool  map[muxID]*smuxClientInfo
 	concurrency int
 	timeout     time.Duration
-	ctx         context.Context
-	cancel      context.CancelFunc
+	dial        dialer
 }
 
 // Config of mux
@@ -40,21 +47,24 @@ type Config struct {
 	IdleTimeout int
 }
 
-func NewClient(config Config) (*Client, error) {
-	ctx := context.Background()
-	ctx, cancel := context.WithCancel(ctx)
+func NewClient(config Config, connDialer dialer) (*Client, error) {
+
 	client := &Client{
 		concurrency: config.Concurrency,
 		timeout:     time.Duration(config.IdleTimeout) * time.Second,
 		clientPool:  make(map[muxID]*smuxClientInfo),
-		ctx:         ctx,
-		cancel:      cancel,
+		dial:        connDialer,
 	}
-	go client.cleanLoop()
+
+	clients = append(clients, client)
+	once.Do(func() {
+		go cleanLoop() // start clean loop
+	})
+
 	return client, nil
 }
 
-func (c *Client) NewMuxConn(dialer func() (net.Conn, error)) (net.Conn, error) {
+func (c *Client) DialConn(ctx context.Context, metadata *C.Metadata) (net.Conn, error) {
 	createNewConn := func(info *smuxClientInfo) (net.Conn, error) {
 		stream, err := info.client.OpenStream()
 		info.lastActiveTime = time.Now()
@@ -80,26 +90,21 @@ func (c *Client) NewMuxConn(dialer func() (net.Conn, error)) (net.Conn, error) {
 		}
 	}
 
-	info, err := c.newMuxClient(dialer)
+	info, err := c.newMuxClient(ctx, metadata)
 	if err != nil {
 		return nil, err
 	}
 	return createNewConn(info)
 }
 
-func (c *Client) Close() error {
-	c.cancel()
-	return nil
-}
-
-func (c *Client) newMuxClient(dialer func() (net.Conn, error)) (*smuxClientInfo, error) {
+func (c *Client) newMuxClient(ctx context.Context, metadata *C.Metadata) (*smuxClientInfo, error) {
 	// The mutex should be locked when this function is called
 	id := generateMuxID()
 	if _, found := c.clientPool[id]; found {
 		return nil, errors.New("duplicated id")
 	}
 
-	conn, err := dialer()
+	conn, err := c.dial(ctx, metadata)
 	if err != nil {
 		return nil, err
 	}
@@ -117,11 +122,12 @@ func (c *Client) newMuxClient(dialer func() (net.Conn, error)) (*smuxClientInfo,
 	return info, nil
 }
 
-func (c *Client) cleanLoop() {
-	checkDuration := c.timeout / 4
+func cleanLoop() {
+	checkDuration := 30 * time.Second // check every 30 sec
+
 	for {
-		select {
-		case <-time.After(checkDuration):
+		<-time.After(checkDuration)
+		for _, c := range clients {
 			c.Lock()
 			for id, info := range c.clientPool {
 				if info.client.IsClosed() {
@@ -135,15 +141,7 @@ func (c *Client) cleanLoop() {
 				}
 			}
 			c.Unlock()
-		case <-c.ctx.Done():
-			c.Lock()
-			for id, info := range c.clientPool {
-				info.client.Close()
-				info.underlayConn.Close()
-				delete(c.clientPool, id)
-			}
-			c.Unlock()
-			return
 		}
 	}
+
 }

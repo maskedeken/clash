@@ -31,6 +31,10 @@ type TrojanOption struct {
 	Mux            Mux      `proxy:"mux,omitempty"`
 }
 
+type Mux struct {
+	Concurrency int `proxy:"concurrency"`
+}
+
 func (t *Trojan) StreamConn(c net.Conn, metadata *C.Metadata) (net.Conn, error) {
 	c, err := t.instance.StreamConn(c)
 	if err != nil {
@@ -41,33 +45,9 @@ func (t *Trojan) StreamConn(c net.Conn, metadata *C.Metadata) (net.Conn, error) 
 	return c, err
 }
 
-func (t *Trojan) dialMux(ctx context.Context, metadata *C.Metadata) (net.Conn, error) {
-	dialer := func() (net.Conn, error) {
-		c, err := dialer.DialContext(ctx, "tcp", t.addr)
-		if err != nil {
-			return nil, fmt.Errorf("%s connect error: %w", t.addr, err)
-		}
-		tcpKeepAlive(c)
-		c, err = t.instance.StreamConn(c)
-		if err != nil {
-			return nil, fmt.Errorf("%s connect error: %w", t.addr, err)
-		}
-
-		err = t.instance.WriteHeader(c, trojan.CommandMUX, serializesSocksAddr(metadata))
-		if err != nil {
-			return nil, err
-		}
-
-		return c, nil
-	}
-
-	return t.mux.NewMuxConn(dialer)
-
-}
-
 func (t *Trojan) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, error) {
 	if t.mux != nil {
-		c, err := t.dialMux(ctx, metadata)
+		c, err := t.mux.DialConn(ctx, metadata)
 		if err != nil {
 			return nil, err
 		}
@@ -95,7 +75,7 @@ func (t *Trojan) DialUDP(metadata *C.Metadata) (C.PacketConn, error) {
 	defer cancel()
 
 	if t.mux != nil {
-		c, err := t.dialMux(ctx, metadata)
+		c, err := t.mux.DialConn(ctx, metadata)
 		if err != nil {
 			return nil, err
 		}
@@ -144,12 +124,7 @@ func NewTrojan(option TrojanOption) (*Trojan, error) {
 		tOption.ServerName = option.SNI
 	}
 
-	var muxClient *mux.Client
-	if option.Mux.Concurrency > 0 { // enable mux
-		muxClient, _ = mux.NewClient(mux.Config{Concurrency: option.Mux.Concurrency, IdleTimeout: 30})
-	}
-
-	return &Trojan{
+	t := &Trojan{
 		Base: &Base{
 			name: option.Name,
 			addr: addr,
@@ -157,6 +132,29 @@ func NewTrojan(option TrojanOption) (*Trojan, error) {
 			udp:  option.UDP,
 		},
 		instance: trojan.New(tOption),
-		mux:      muxClient,
-	}, nil
+	}
+
+	if option.Mux.Concurrency > 0 { // enable mux
+		muxClient, _ := mux.NewClient(mux.Config{Concurrency: option.Mux.Concurrency, IdleTimeout: 30}, func(ctx context.Context, metadata *C.Metadata) (net.Conn, error) {
+			c, err := dialer.DialContext(ctx, "tcp", t.addr)
+			if err != nil {
+				return nil, fmt.Errorf("%s connect error: %w", t.addr, err)
+			}
+			tcpKeepAlive(c)
+			c, err = t.instance.StreamConn(c)
+			if err != nil {
+				return nil, fmt.Errorf("%s connect error: %w", t.addr, err)
+			}
+
+			err = t.instance.WriteHeader(c, trojan.CommandMUX, serializesSocksAddr(metadata))
+			if err != nil {
+				return nil, err
+			}
+
+			return c, nil
+		})
+		t.mux = muxClient
+	}
+
+	return t, nil
 }
