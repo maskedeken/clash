@@ -122,7 +122,7 @@ func (v *Vless) DialUDP(metadata *C.Metadata) (C.PacketConn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("new vless client error: %v", err)
 	}
-	return newPacketConn(&vlessPacketConn{Conn: c, rAddr: metadata.UDPAddr()}, v), nil
+	return newPacketConn(&vmessPacketConn{Conn: c, rAddr: metadata.UDPAddr()}, v), nil
 }
 
 func NewVless(option VlessOption) (*Vless, error) {
@@ -141,18 +141,4 @@ func NewVless(option VlessOption) (*Vless, error) {
 		client: client,
 		option: &option,
 	}, nil
-}
-
-type vlessPacketConn struct {
-	net.Conn
-	rAddr net.Addr
-}
-
-func (uc *vlessPacketConn) WriteTo(b []byte, addr net.Addr) (int, error) {
-	return uc.Conn.Write(b)
-}
-
-func (uc *vlessPacketConn) ReadFrom(b []byte) (int, net.Addr, error) {
-	n, err := uc.Conn.Read(b)
-	return n, uc.rAddr, err
 }
