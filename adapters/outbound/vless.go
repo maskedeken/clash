@@ -3,17 +3,24 @@ package outbound
 import (
 	"context"
 	"crypto/tls"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"strconv"
+	"sync"
 
 	"github.com/Dreamacro/clash/component/dialer"
 	"github.com/Dreamacro/clash/component/resolver"
 	"github.com/Dreamacro/clash/component/vless"
 	"github.com/Dreamacro/clash/component/vmess"
 	C "github.com/Dreamacro/clash/constant"
+)
+
+const (
+	// max packet length
+	maxLength = 8192
 )
 
 type Vless struct {
@@ -122,7 +129,7 @@ func (v *Vless) DialUDP(metadata *C.Metadata) (C.PacketConn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("new vless client error: %v", err)
 	}
-	return newPacketConn(&vmessPacketConn{Conn: c, rAddr: metadata.UDPAddr()}, v), nil
+	return newPacketConn(newVlessPacketConn(c, metadata.UDPAddr()), v), nil
 }
 
 func NewVless(option VlessOption) (*Vless, error) {
@@ -141,4 +148,91 @@ func NewVless(option VlessOption) (*Vless, error) {
 		client: client,
 		option: &option,
 	}, nil
+}
+
+func newVlessPacketConn(c net.Conn, addr net.Addr) *vlessPacketConn {
+	return &vlessPacketConn{Conn: c,
+		rAddr: addr,
+		cache: make([]byte, 0, maxLength+2),
+	}
+}
+
+type vlessPacketConn struct {
+	net.Conn
+	rAddr  net.Addr
+	remain int
+	mux    sync.Mutex
+	cache  []byte
+}
+
+func (c *vlessPacketConn) writePacket(b []byte, addr net.Addr) (int, error) {
+	length := len(b)
+	defer func() {
+		c.cache = c.cache[:0]
+	}()
+	c.cache = append(c.cache, byte(length>>8), byte(length))
+	c.cache = append(c.cache, b...)
+	n, err := c.Conn.Write(c.cache)
+	if n > 2 {
+		return n - 2, err
+	}
+
+	return 0, err
+}
+
+func (c *vlessPacketConn) WriteTo(b []byte, addr net.Addr) (int, error) {
+	if len(b) <= maxLength {
+		return c.writePacket(b, addr)
+	}
+
+	offset := 0
+	total := len(b)
+	for offset < total {
+		cursor := offset + maxLength
+		if cursor > total {
+			cursor = total
+		}
+
+		n, err := c.writePacket(b[offset:cursor], addr)
+		if err != nil {
+			return offset + n, err
+		}
+
+		offset = cursor
+	}
+
+	return total, nil
+}
+
+func (c *vlessPacketConn) ReadFrom(b []byte) (int, net.Addr, error) {
+	c.mux.Lock()
+	defer c.mux.Unlock()
+
+	length := len(b)
+	if c.remain > 0 {
+		if c.remain < length {
+			length = c.remain
+		}
+
+		n, err := c.Conn.Read(b[:length])
+		if err != nil {
+			return 0, nil, err
+		}
+
+		c.remain -= n
+		return n, c.rAddr, nil
+	}
+
+	var packetLength uint16
+	if err := binary.Read(c.Conn, binary.BigEndian, &packetLength); err != nil {
+		return 0, nil, err
+	}
+
+	remain := int(packetLength)
+	n, err := c.Conn.Read(b[:length])
+	remain -= n
+	if remain > 0 {
+		c.remain = remain
+	}
+	return n, c.rAddr, err
 }
