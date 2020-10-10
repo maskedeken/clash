@@ -26,6 +26,7 @@ type TrojanOption struct {
 	SNI            string   `proxy:"sni,omitempty"`
 	SkipCertVerify bool     `proxy:"skip-cert-verify,omitempty"`
 	UDP            bool     `proxy:"udp,omitempty"`
+	Flow           string   `proxy:"flow,omitempty"`
 }
 
 func (t *Trojan) StreamConn(c net.Conn, metadata *C.Metadata) (net.Conn, error) {
@@ -88,7 +89,9 @@ func NewTrojan(option TrojanOption) (*Trojan, error) {
 		ALPN:               option.ALPN,
 		ServerName:         option.Server,
 		SkipCertVerify:     option.SkipCertVerify,
+		Flow:               option.Flow,
 		ClientSessionCache: getClientSessionCache(),
+		XTLSSessionCache:   getXTLSSessionCache(),
 	}
 
 	if option.SNI != "" {

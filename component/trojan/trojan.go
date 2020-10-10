@@ -12,11 +12,15 @@ import (
 	"sync"
 
 	"github.com/Dreamacro/clash/component/socks5"
+	xtls "github.com/xtls/go"
 )
 
 const (
 	// max packet length
 	maxLength = 8192
+
+	XRO = "xtls-rprx-origin"
+	XRD = "xtls-rprx-direct"
 )
 
 var (
@@ -31,6 +35,10 @@ type Command = byte
 var (
 	CommandTCP byte = 1
 	CommandUDP byte = 3
+
+	// for xtls
+	commandXRO byte = 0xf1
+	commandXRD byte = 0xf2
 )
 
 type Option struct {
@@ -38,7 +46,9 @@ type Option struct {
 	ALPN               []string
 	ServerName         string
 	SkipCertVerify     bool
+	Flow               string
 	ClientSessionCache tls.ClientSessionCache
+	XTLSSessionCache   xtls.ClientSessionCache
 }
 
 type Trojan struct {
@@ -52,23 +62,64 @@ func (t *Trojan) StreamConn(conn net.Conn) (net.Conn, error) {
 		alpn = t.option.ALPN
 	}
 
-	tlsConfig := &tls.Config{
-		NextProtos:         alpn,
-		MinVersion:         tls.VersionTLS12,
-		InsecureSkipVerify: t.option.SkipCertVerify,
-		ServerName:         t.option.ServerName,
-		ClientSessionCache: t.option.ClientSessionCache,
+	var c net.Conn
+	switch t.option.Flow {
+	case XRO, XRD:
+		xtlsConfig := &xtls.Config{
+			NextProtos:         alpn,
+			InsecureSkipVerify: t.option.SkipCertVerify,
+			ServerName:         t.option.ServerName,
+			ClientSessionCache: t.option.XTLSSessionCache,
+		}
+
+		xtlsConn := xtls.Client(conn, xtlsConfig)
+		if err := xtlsConn.Handshake(); err != nil {
+			return nil, err
+		}
+
+		c = xtlsConn
+	case "":
+	default:
+		return nil, nil
 	}
 
-	tlsConn := tls.Client(conn, tlsConfig)
-	if err := tlsConn.Handshake(); err != nil {
-		return nil, err
+	if c == nil {
+		tlsConfig := &tls.Config{
+			NextProtos:         alpn,
+			MinVersion:         tls.VersionTLS12,
+			InsecureSkipVerify: t.option.SkipCertVerify,
+			ServerName:         t.option.ServerName,
+			ClientSessionCache: t.option.ClientSessionCache,
+		}
+
+		tlsConn := tls.Client(conn, tlsConfig)
+		if err := tlsConn.Handshake(); err != nil {
+			return nil, err
+		}
+
+		c = tlsConn
 	}
 
-	return tlsConn, nil
+	return c, nil
 }
 
 func (t *Trojan) WriteHeader(w io.Writer, command Command, socks5Addr []byte) error {
+	if command == CommandTCP && t.option.Flow != "" {
+		switch t.option.Flow {
+		case XRO, XRD:
+			if xtlsConn, ok := w.(*xtls.Conn); ok {
+				xtlsConn.RPRX = true
+
+				if t.option.Flow == XRD {
+					xtlsConn.DirectMode = true
+					command = commandXRD
+				} else {
+					command = commandXRO
+				}
+			}
+		}
+	}
+
 	buf := bufPool.Get().(*bytes.Buffer)
 	defer bufPool.Put(buf)
 	defer buf.Reset()
