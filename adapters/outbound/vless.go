@@ -20,7 +20,7 @@ import (
 
 const (
 	// max packet length
-	maxLength = 8192
+	maxLength = 2046
 )
 
 type Vless struct {
