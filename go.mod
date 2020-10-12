@@ -4,6 +4,7 @@ go 1.14
 
 require (
 	github.com/Dreamacro/go-shadowsocks2 v0.1.6
+	github.com/aead/chacha20 v0.0.0-20180709150244-8b13a72661da // indirect
 	github.com/eapache/queue v1.1.0 // indirect
 	github.com/go-chi/chi v4.1.2+incompatible
 	github.com/go-chi/cors v1.1.1
@@ -15,6 +16,7 @@ require (
 	github.com/oschwald/geoip2-golang v1.4.0
 	github.com/sirupsen/logrus v1.6.0
 	github.com/stretchr/testify v1.6.1
+	github.com/tjfoc/gmsm v1.3.2 // indirect
 	github.com/xtls/go v0.0.0-20201007031018-d42c13c57942
 	golang.org/x/crypto v0.0.0-20200728195943-123391ffb6de
 	golang.org/x/net v0.0.0-20200813134508-3edf25e44fcc

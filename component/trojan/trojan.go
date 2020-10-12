@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"sync"
@@ -80,7 +81,7 @@ func (t *Trojan) StreamConn(conn net.Conn) (net.Conn, error) {
 		c = xtlsConn
 	case "":
 	default:
-		return nil, nil
+		return nil, fmt.Errorf("unsupported flow type: %s", t.option.Flow)
 	}
 
 	if c == nil {
