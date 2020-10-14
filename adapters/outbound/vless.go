@@ -1,6 +1,7 @@
 package outbound
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/binary"
@@ -22,6 +23,8 @@ const (
 	// max packet length
 	maxLength = 2046
 )
+
+var bufPool = sync.Pool{New: func() interface{} { return &bytes.Buffer{} }}
 
 type Vless struct {
 	*Base
@@ -153,7 +156,6 @@ func NewVless(option VlessOption) (*Vless, error) {
 func newVlessPacketConn(c net.Conn, addr net.Addr) *vlessPacketConn {
 	return &vlessPacketConn{Conn: c,
 		rAddr: addr,
-		cache: make([]byte, 0, maxLength+2),
 	}
 }
 
@@ -162,17 +164,22 @@ type vlessPacketConn struct {
 	rAddr  net.Addr
 	remain int
 	mux    sync.Mutex
-	cache  []byte
 }
 
 func (c *vlessPacketConn) writePacket(b []byte, addr net.Addr) (int, error) {
 	length := len(b)
-	defer func() {
-		c.cache = c.cache[:0]
-	}()
-	c.cache = append(c.cache, byte(length>>8), byte(length))
-	c.cache = append(c.cache, b...)
-	n, err := c.Conn.Write(c.cache)
+	if length == 0 {
+		return 0, nil
+	}
+
+	buffer := bufPool.Get().(*bytes.Buffer)
+	defer bufPool.Put(buffer)
+	defer buffer.Reset()
+
+	buffer.WriteByte(byte(length >> 8))
+	buffer.WriteByte(byte(length))
+	buffer.Write(b)
+	n, err := c.Conn.Write(buffer.Bytes())
 	if n > 2 {
 		return n - 2, err
 	}
