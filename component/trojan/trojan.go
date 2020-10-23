@@ -38,8 +38,8 @@ var (
 	CommandUDP byte = 3
 
 	// for xtls
-	commandXRO byte = 0xf1
-	commandXRD byte = 0xf2
+	commandXRD byte = 0xf0 // XTLS direct mode
+	commandXRO byte = 0xf1 // XTLS origin mode
 )
 
 type Option struct {
