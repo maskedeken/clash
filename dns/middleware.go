@@ -3,31 +3,32 @@ package dns
 import (
 	"net"
 	"strings"
+	"time"
 
+	"github.com/Dreamacro/clash/common/cache"
 	"github.com/Dreamacro/clash/component/fakeip"
 	"github.com/Dreamacro/clash/component/trie"
+	"github.com/Dreamacro/clash/context"
 	"github.com/Dreamacro/clash/log"
 
 	D "github.com/miekg/dns"
 )
 
-type handler func(w D.ResponseWriter, r *D.Msg)
+type handler func(ctx *context.DNSContext, r *D.Msg) (*D.Msg, error)
 type middleware func(next handler) handler
 
 func withHosts(hosts *trie.DomainTrie) middleware {
 	return func(next handler) handler {
-		return func(w D.ResponseWriter, r *D.Msg) {
+		return func(ctx *context.DNSContext, r *D.Msg) (*D.Msg, error) {
 			q := r.Question[0]
 
 			if !isIPRequest(q) {
-				next(w, r)
-				return
+				return next(ctx, r)
 			}
 
 			record := hosts.Search(strings.TrimRight(q.Name, "."))
 			if record == nil {
-				next(w, r)
-				return
+				return next(ctx, r)
 			}
 
 			ip := record.Data.(net.IP)
@@ -46,44 +47,75 @@ func withHosts(hosts *trie.DomainTrie) middleware {
 
 				msg.Answer = []D.RR{rr}
 			} else {
-				next(w, r)
-				return
+				return next(ctx, r)
 			}
 
+			ctx.SetType(context.DNSTypeHost)
 			msg.SetRcode(r, D.RcodeSuccess)
 			msg.Authoritative = true
 			msg.RecursionAvailable = true
 
-			w.WriteMsg(msg)
-			return
+			return msg, nil
+		}
+	}
+}
+
+func withMapping(mapping *cache.LruCache) middleware {
+	return func(next handler) handler {
+		return func(ctx *context.DNSContext, r *D.Msg) (*D.Msg, error) {
+			q := r.Question[0]
+
+			if !isIPRequest(q) {
+				return next(ctx, r)
+			}
+
+			msg, err := next(ctx, r)
+			if err != nil {
+				return nil, err
+			}
+
+			host := strings.TrimRight(q.Name, ".")
+
+			for _, ans := range msg.Answer {
+				var ip net.IP
+				var ttl uint32
+
+				switch a := ans.(type) {
+				case *D.A:
+					ip = a.A
+					ttl = a.Hdr.Ttl
+				case *D.AAAA:
+					ip = a.AAAA
+					ttl = a.Hdr.Ttl
+				default:
+					continue
+				}
+
+				mapping.SetWithExpire(ip.String(), host, time.Now().Add(time.Second*time.Duration(ttl)))
+			}
+
+			return msg, nil
 		}
 	}
 }
 
 func withFakeIP(fakePool *fakeip.Pool) middleware {
 	return func(next handler) handler {
-		return func(w D.ResponseWriter, r *D.Msg) {
+		return func(ctx *context.DNSContext, r *D.Msg) (*D.Msg, error) {
 			q := r.Question[0]
-
-			if q.Qtype == D.TypeAAAA {
-				msg := &D.Msg{}
-				msg.Answer = []D.RR{}
-
-				msg.SetRcode(r, D.RcodeSuccess)
-				msg.Authoritative = true
-				msg.RecursionAvailable = true
-
-				w.WriteMsg(msg)
-				return
-			} else if q.Qtype != D.TypeA {
-				next(w, r)
-				return
-			}
 
 			host := strings.TrimRight(q.Name, ".")
 			if fakePool.LookupHost(host) {
-				next(w, r)
-				return
+				return next(ctx, r)
+			}
+
+			switch q.Qtype {
+			case D.TypeAAAA, D.TypeSVCB, D.TypeHTTPS:
+				return handleMsgWithEmptyAnswer(r), nil
+			}
+
+			if q.Qtype != D.TypeA {
+				return next(ctx, r)
 			}
 
 			rr := &D.A{}
@@ -93,44 +125,36 @@ func withFakeIP(fakePool *fakeip.Pool) middleware {
 			msg := r.Copy()
 			msg.Answer = []D.RR{rr}
 
+			ctx.SetType(context.DNSTypeFakeIP)
 			setMsgTTL(msg, 1)
 			msg.SetRcode(r, D.RcodeSuccess)
 			msg.Authoritative = true
 			msg.RecursionAvailable = true
 
-			w.WriteMsg(msg)
-			return
+			return msg, nil
 		}
 	}
 }
 
 func withResolver(resolver *Resolver) handler {
-	return func(w D.ResponseWriter, r *D.Msg) {
+	return func(ctx *context.DNSContext, r *D.Msg) (*D.Msg, error) {
+		ctx.SetType(context.DNSTypeRaw)
 		q := r.Question[0]
 
 		// return a empty AAAA msg when ipv6 disabled
 		if !resolver.ipv6 && q.Qtype == D.TypeAAAA {
-			msg := &D.Msg{}
-			msg.Answer = []D.RR{}
-
-			msg.SetRcode(r, D.RcodeSuccess)
-			msg.Authoritative = true
-			msg.RecursionAvailable = true
-
-			w.WriteMsg(msg)
-			return
+			return handleMsgWithEmptyAnswer(r), nil
 		}
 
 		msg, err := resolver.Exchange(r)
 		if err != nil {
 			log.Debugln("[DNS Server] Exchange %s failed: %v", q.String(), err)
-			D.HandleFailed(w, r)
-			return
+			return msg, err
 		}
 		msg.SetRcode(r, msg.Rcode)
 		msg.Authoritative = true
-		w.WriteMsg(msg)
-		return
+
+		return msg, nil
 	}
 }
 
@@ -145,15 +169,19 @@ func compose(middlewares []middleware, endpoint handler) handler {
 	return h
 }
 
-func newHandler(resolver *Resolver) handler {
+func newHandler(resolver *Resolver, mapper *ResolverEnhancer) handler {
 	middlewares := []middleware{}
 
 	if resolver.hosts != nil {
 		middlewares = append(middlewares, withHosts(resolver.hosts))
 	}
 
-	if resolver.FakeIPEnabled() {
-		middlewares = append(middlewares, withFakeIP(resolver.pool))
+	if mapper.mode == FAKEIP {
+		middlewares = append(middlewares, withFakeIP(mapper.fakePool))
+	}
+
+	if mapper.mode != NORMAL {
+		middlewares = append(middlewares, withMapping(mapper.mapping))
 	}
 
 	return compose(middlewares, withResolver(resolver))

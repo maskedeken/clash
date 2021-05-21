@@ -1,12 +1,10 @@
 package vmess
 
 import (
-	"crypto/tls"
 	"fmt"
 	"math/rand"
 	"net"
 	"runtime"
-	"sync"
 
 	"github.com/gofrs/uuid"
 )
@@ -37,11 +35,6 @@ var CipherMapping = map[string]byte{
 	"chacha20-poly1305": SecurityCHACHA20POLY1305,
 }
 
-var (
-	clientSessionCache tls.ClientSessionCache
-	once               sync.Once
-)
-
 // Command types
 const (
 	CommandTCP byte = 1
@@ -68,6 +61,7 @@ type Client struct {
 	user     []*ID
 	uuid     *uuid.UUID
 	security Security
+	isAead   bool
 }
 
 // Config of vmess
@@ -77,12 +71,13 @@ type Config struct {
 	Security string
 	Port     string
 	HostName string
+	IsAead   bool
 }
 
 // StreamConn return a Conn with net.Conn and DstAddr
 func (c *Client) StreamConn(conn net.Conn, dst *DstAddr) (net.Conn, error) {
 	r := rand.Intn(len(c.user))
-	return newConn(conn, c.user[r], dst, c.security)
+	return newConn(conn, c.user[r], dst, c.security, c.isAead)
 }
 
 // NewClient return Client instance
@@ -106,12 +101,13 @@ func NewClient(config Config) (*Client, error) {
 			security = SecurityAES128GCM
 		}
 	default:
-		return nil, fmt.Errorf("Unknown security type: %s", config.Security)
+		return nil, fmt.Errorf("unknown security type: %s", config.Security)
 	}
 
 	return &Client{
 		user:     newAlterIDs(newID(&uid), config.AlterID),
 		uuid:     &uid,
 		security: security,
+		isAead:   config.IsAead,
 	}, nil
 }

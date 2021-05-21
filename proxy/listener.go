@@ -17,32 +17,30 @@ var (
 	allowLan    = false
 	bindAddress = "*"
 
-	socksListener    *socks.SockListener
-	socksUDPListener *socks.SockUDPListener
-	httpListener     *http.HttpListener
-	redirListener    *redir.RedirListener
-	redirUDPListener *redir.RedirUDPListener
-	mixedListener    *mixed.MixedListener
-	mixedUDPLister   *socks.SockUDPListener
+	socksListener     *socks.SockListener
+	socksUDPListener  *socks.SockUDPListener
+	httpListener      *http.HTTPListener
+	redirListener     *redir.RedirListener
+	redirUDPListener  *redir.RedirUDPListener
+	tproxyListener    *redir.TProxyListener
+	tproxyUDPListener *redir.RedirUDPListener
+	mixedListener     *mixed.MixedListener
+	mixedUDPLister    *socks.SockUDPListener
 
 	// lock for recreate function
-	socksMux sync.Mutex
-	httpMux  sync.Mutex
-	redirMux sync.Mutex
-	mixedMux sync.Mutex
-	tunMux   sync.Mutex
+	socksMux  sync.Mutex
+	httpMux   sync.Mutex
+	redirMux  sync.Mutex
+	tproxyMux sync.Mutex
+	mixedMux  sync.Mutex
 )
 
-type listener interface {
-	Close()
-	Address() string
-}
-
 type Ports struct {
-	Port      int `json:"port"`
-	SocksPort int `json:"socks-port"`
-	RedirPort int `json:"redir-port"`
-	MixedPort int `json:"mixed-port"`
+	Port       int `json:"port"`
+	SocksPort  int `json:"socks-port"`
+	RedirPort  int `json:"redir-port"`
+	TProxyPort int `json:"tproxy-port"`
+	MixedPort  int `json:"mixed-port"`
 }
 
 func AllowLan() bool {
@@ -80,7 +78,7 @@ func ReCreateHTTP(port int) error {
 	}
 
 	var err error
-	httpListener, err = http.NewHttpProxy(addr)
+	httpListener, err = http.NewHTTPProxy(addr)
 	if err != nil {
 		return err
 	}
@@ -180,6 +178,46 @@ func ReCreateRedir(port int) error {
 	return nil
 }
 
+func ReCreateTProxy(port int) error {
+	tproxyMux.Lock()
+	defer tproxyMux.Unlock()
+
+	addr := genAddr(bindAddress, port, allowLan)
+
+	if tproxyListener != nil {
+		if tproxyListener.Address() == addr {
+			return nil
+		}
+		tproxyListener.Close()
+		tproxyListener = nil
+	}
+
+	if tproxyUDPListener != nil {
+		if tproxyUDPListener.Address() == addr {
+			return nil
+		}
+		tproxyUDPListener.Close()
+		tproxyUDPListener = nil
+	}
+
+	if portIsZero(addr) {
+		return nil
+	}
+
+	var err error
+	tproxyListener, err = redir.NewTProxy(addr)
+	if err != nil {
+		return err
+	}
+
+	tproxyUDPListener, err = redir.NewRedirUDPProxy(addr)
+	if err != nil {
+		log.Warnln("Failed to start TProxy UDP Listener: %s", err)
+	}
+
+	return nil
+}
+
 func ReCreateMixed(port int) error {
 	mixedMux.Lock()
 	defer mixedMux.Unlock()
@@ -251,6 +289,12 @@ func GetPorts() *Ports {
 		ports.RedirPort = port
 	}
 
+	if tproxyListener != nil {
+		_, portStr, _ := net.SplitHostPort(tproxyListener.Address())
+		port, _ := strconv.Atoi(portStr)
+		ports.TProxyPort = port
+	}
+
 	if mixedListener != nil {
 		_, portStr, _ := net.SplitHostPort(mixedListener.Address())
 		port, _ := strconv.Atoi(portStr)
@@ -272,9 +316,8 @@ func genAddr(host string, port int, allowLan bool) string {
 	if allowLan {
 		if host == "*" {
 			return fmt.Sprintf(":%d", port)
-		} else {
-			return fmt.Sprintf("%s:%d", host, port)
 		}
+		return fmt.Sprintf("%s:%d", host, port)
 	}
 
 	return fmt.Sprintf("127.0.0.1:%d", port)

@@ -5,10 +5,7 @@ import (
 )
 
 var (
-	errPayload            = errors.New("payload error")
-	errParams             = errors.New("params error")
-	ErrPlatformNotSupport = errors.New("not support on this platform")
-	ErrInvalidNetwork     = errors.New("invalid network")
+	errPayload = errors.New("payload error")
 
 	noResolve = "no-resolve"
 )

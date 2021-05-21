@@ -6,9 +6,13 @@ import (
 	"os"
 	"sync"
 
+	"github.com/Dreamacro/clash/adapters/outbound"
+	"github.com/Dreamacro/clash/adapters/outboundgroup"
 	"github.com/Dreamacro/clash/adapters/provider"
 	"github.com/Dreamacro/clash/component/auth"
 	"github.com/Dreamacro/clash/component/dialer"
+	"github.com/Dreamacro/clash/component/profile"
+	"github.com/Dreamacro/clash/component/profile/cachefile"
 	"github.com/Dreamacro/clash/component/resolver"
 	"github.com/Dreamacro/clash/component/trie"
 	"github.com/Dreamacro/clash/config"
@@ -34,7 +38,7 @@ func readConfig(path string) ([]byte, error) {
 	}
 
 	if len(data) == 0 {
-		return nil, fmt.Errorf("Configuration file %s is empty", path)
+		return nil, fmt.Errorf("configuration file %s is empty", path)
 	}
 
 	return data, err
@@ -72,6 +76,7 @@ func ApplyConfig(cfg *config.Config, force bool) {
 	updateDNS(cfg.DNS)
 	updateHosts(cfg.Hosts)
 	updateExperimental(cfg)
+	updateProfile(cfg)
 }
 
 func GetGeneral() *config.General {
@@ -86,6 +91,7 @@ func GetGeneral() *config.General {
 			Port:           ports.Port,
 			SocksPort:      ports.SocksPort,
 			RedirPort:      ports.RedirPort,
+			TProxyPort:     ports.TProxyPort,
 			MixedPort:      ports.MixedPort,
 			Authentication: authenticator,
 			AllowLan:       P.AllowLan(),
@@ -93,6 +99,7 @@ func GetGeneral() *config.General {
 		},
 		Mode:     tunnel.Mode(),
 		LogLevel: log.Level(),
+		IPv6:     !resolver.DisableIPv6,
 	}
 
 	return general
@@ -101,13 +108,14 @@ func GetGeneral() *config.General {
 func updateExperimental(c *config.Config) {}
 
 func updateDNS(c *config.DNS) {
-	if c.Enable == false {
+	if !c.Enable {
 		resolver.DefaultResolver = nil
-		tunnel.SetResolver(nil)
-		dns.ReCreateServer("", nil)
+		resolver.DefaultHostMapper = nil
+		dns.ReCreateServer("", nil, nil)
 		return
 	}
-	r := dns.New(dns.Config{
+
+	cfg := dns.Config{
 		Main:         c.NameServer,
 		Fallback:     c.Fallback,
 		IPv6:         c.IPv6,
@@ -117,12 +125,23 @@ func updateDNS(c *config.DNS) {
 		FallbackFilter: dns.FallbackFilter{
 			GeoIP:  c.FallbackFilter.GeoIP,
 			IPCIDR: c.FallbackFilter.IPCIDR,
+			Domain: c.FallbackFilter.Domain,
 		},
 		Default: c.DefaultNameserver,
-	})
+	}
+
+	r := dns.NewResolver(cfg)
+	m := dns.NewEnhancer(cfg)
+
+	// reuse cache of old host mapper
+	if old := resolver.DefaultHostMapper; old != nil {
+		m.PatchFrom(old.(*dns.ResolverEnhancer))
+	}
+
 	resolver.DefaultResolver = r
-	tunnel.SetResolver(r)
-	if err := dns.ReCreateServer(c.Listen, r); err != nil {
+	resolver.DefaultHostMapper = m
+
+	if err := dns.ReCreateServer(c.Listen, r, m); err != nil {
 		log.Errorln("Start DNS server error: %s", err.Error())
 		return
 	}
@@ -179,6 +198,10 @@ func updateGeneral(general *config.General, force bool) {
 		log.Errorln("Start Redir server error: %s", err.Error())
 	}
 
+	if err := P.ReCreateTProxy(general.TProxyPort); err != nil {
+		log.Errorln("Start TProxy server error: %s", err.Error())
+	}
+
 	if err := P.ReCreateMixed(general.MixedPort); err != nil {
 		log.Errorln("Start Mixed(http and socks5) server error: %s", err.Error())
 	}
@@ -189,5 +212,40 @@ func updateUsers(users []auth.AuthUser) {
 	authStore.SetAuthenticator(authenticator)
 	if authenticator != nil {
 		log.Infoln("Authentication of local server updated")
+	}
+}
+
+func updateProfile(cfg *config.Config) {
+	profileCfg := cfg.Profile
+
+	profile.StoreSelected.Store(profileCfg.StoreSelected)
+	if profileCfg.StoreSelected {
+		patchSelectGroup(cfg.Proxies)
+	}
+}
+
+func patchSelectGroup(proxies map[string]C.Proxy) {
+	mapping := cachefile.Cache().SelectedMap()
+	if mapping == nil {
+		return
+	}
+
+	for name, proxy := range proxies {
+		outbound, ok := proxy.(*outbound.Proxy)
+		if !ok {
+			continue
+		}
+
+		selector, ok := outbound.ProxyAdapter.(*outboundgroup.Selector)
+		if !ok {
+			continue
+		}
+
+		selected, exist := mapping[name]
+		if !exist {
+			continue
+		}
+
+		selector.Set(selected)
 	}
 }

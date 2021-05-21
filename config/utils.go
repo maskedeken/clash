@@ -15,15 +15,6 @@ func trimArr(arr []string) (r []string) {
 	return
 }
 
-func or(pointers ...*int) *int {
-	for _, p := range pointers {
-		if p != nil {
-			return p
-		}
-	}
-	return pointers[len(pointers)-1]
-}
-
 // Check if ProxyGroups form DAG(Directed Acyclic Graph), and sort all ProxyGroups by dependency order.
 // Meanwhile, record the original index in the config file.
 // If loop is detected, return an error with location of loop.
@@ -32,7 +23,7 @@ func proxyGroupsDagSort(groupsConfig []map[string]interface{}) error {
 		indegree int
 		// topological order
 		topo int
-		// the origional data in `groupsConfig`
+		// the original data in `groupsConfig`
 		data map[string]interface{}
 		// `outdegree` and `from` are used in loop locating
 		outdegree int
@@ -74,7 +65,7 @@ func proxyGroupsDagSort(groupsConfig []map[string]interface{}) error {
 	index := 0
 	queue := make([]string, 0)
 	for name, node := range graph {
-		// in the begning, put nodes that have `node.indegree == 0` into queue.
+		// in the beginning, put nodes that have `node.indegree == 0` into queue.
 		if node.indegree == 0 {
 			queue = append(queue, name)
 		}
@@ -153,5 +144,5 @@ func proxyGroupsDagSort(groupsConfig []map[string]interface{}) error {
 		loopElements = append(loopElements, name)
 		delete(graph, name)
 	}
-	return fmt.Errorf("Loop is detected in ProxyGroup, please check following ProxyGroups: %v", loopElements)
+	return fmt.Errorf("loop is detected in ProxyGroup, please check following ProxyGroups: %v", loopElements)
 }

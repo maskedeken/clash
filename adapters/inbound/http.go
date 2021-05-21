@@ -6,33 +6,18 @@ import (
 	"strings"
 
 	C "github.com/Dreamacro/clash/constant"
+	"github.com/Dreamacro/clash/context"
 )
 
-// HTTPAdapter is a adapter for HTTP connection
-type HTTPAdapter struct {
-	net.Conn
-	metadata *C.Metadata
-	R        *http.Request
-}
-
-// Metadata return destination metadata
-func (h *HTTPAdapter) Metadata() *C.Metadata {
-	return h.metadata
-}
-
-// NewHTTP is HTTPAdapter generator
-func NewHTTP(request *http.Request, conn net.Conn) *HTTPAdapter {
+// NewHTTP receive normal http request and return HTTPContext
+func NewHTTP(request *http.Request, conn net.Conn) *context.HTTPContext {
 	metadata := parseHTTPAddr(request)
 	metadata.Type = C.HTTP
 	if ip, port, err := parseAddr(conn.RemoteAddr().String()); err == nil {
 		metadata.SrcIP = ip
 		metadata.SrcPort = port
 	}
-	return &HTTPAdapter{
-		metadata: metadata,
-		R:        request,
-		Conn:     conn,
-	}
+	return context.NewHTTPContext(conn, request, metadata)
 }
 
 // RemoveHopByHopHeaders remove hop-by-hop header
@@ -57,4 +42,20 @@ func RemoveHopByHopHeaders(header http.Header) {
 	for _, h := range strings.Split(connections, ",") {
 		header.Del(strings.TrimSpace(h))
 	}
+}
+
+// RemoveExtraHTTPHostPort remove extra host port (example.com:80 --> example.com)
+// It resolves the behavior of some HTTP servers that do not handle host:80 (e.g. baidu.com)
+func RemoveExtraHTTPHostPort(req *http.Request) {
+	host := req.Host
+	if host == "" {
+		host = req.URL.Host
+	}
+
+	if pHost, port, err := net.SplitHostPort(host); err == nil && port == "80" {
+		host = pHost
+	}
+
+	req.Host = host
+	req.URL.Host = host
 }

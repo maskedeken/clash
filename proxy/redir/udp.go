@@ -26,7 +26,12 @@ func NewRedirUDPProxy(addr string) (*RedirUDPListener, error) {
 
 	c := l.(*net.UDPConn)
 
-	err = setsockopt(c, addr)
+	rc, err := c.SyscallConn()
+	if err != nil {
+		return nil, err
+	}
+
+	err = setsockopt(rc, addr)
 	if err != nil {
 		return nil, err
 	}
@@ -70,5 +75,5 @@ func handleRedirUDP(pc net.PacketConn, buf []byte, lAddr *net.UDPAddr, rAddr *ne
 		lAddr: lAddr,
 		buf:   buf,
 	}
-	tunnel.AddPacket(adapters.NewPacket(target, pkt, C.REDIR))
+	tunnel.AddPacket(adapters.NewPacket(target, pkt, C.TPROXY))
 }

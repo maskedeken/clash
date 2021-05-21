@@ -31,9 +31,11 @@ type HttpOption struct {
 	UserName       string `proxy:"username,omitempty"`
 	Password       string `proxy:"password,omitempty"`
 	TLS            bool   `proxy:"tls,omitempty"`
+	SNI            string `proxy:"sni,omitempty"`
 	SkipCertVerify bool   `proxy:"skip-cert-verify,omitempty"`
 }
 
+// StreamConn implements C.ProxyAdapter
 func (h *Http) StreamConn(c net.Conn, metadata *C.Metadata) (net.Conn, error) {
 	if h.tlsConfig != nil {
 		cc := tls.Client(c, h.tlsConfig)
@@ -50,12 +52,15 @@ func (h *Http) StreamConn(c net.Conn, metadata *C.Metadata) (net.Conn, error) {
 	return c, nil
 }
 
-func (h *Http) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, error) {
+// DialContext implements C.ProxyAdapter
+func (h *Http) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.Conn, err error) {
 	c, err := dialer.DialContext(ctx, "tcp", h.addr)
 	if err != nil {
 		return nil, fmt.Errorf("%s connect error: %w", h.addr, err)
 	}
 	tcpKeepAlive(c)
+
+	defer safeConnClose(c, err)
 
 	c, err = h.StreamConn(c, metadata)
 	if err != nil {
@@ -114,10 +119,14 @@ func (h *Http) shakeHand(metadata *C.Metadata, rw io.ReadWriter) error {
 func NewHttp(option HttpOption) *Http {
 	var tlsConfig *tls.Config
 	if option.TLS {
+		sni := option.Server
+		if option.SNI != "" {
+			sni = option.SNI
+		}
 		tlsConfig = &tls.Config{
 			InsecureSkipVerify: option.SkipCertVerify,
 			ClientSessionCache: getClientSessionCache(),
-			ServerName:         option.Server,
+			ServerName:         sni,
 		}
 	}
 

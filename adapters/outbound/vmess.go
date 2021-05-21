@@ -2,6 +2,7 @@ package outbound
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
@@ -10,15 +11,23 @@ import (
 	"strings"
 
 	"github.com/Dreamacro/clash/component/dialer"
+	"github.com/Dreamacro/clash/component/gun"
 	"github.com/Dreamacro/clash/component/resolver"
 	"github.com/Dreamacro/clash/component/vmess"
 	C "github.com/Dreamacro/clash/constant"
+
+	"golang.org/x/net/http2"
 )
 
 type Vmess struct {
 	*Base
 	client *vmess.Client
 	option *VmessOption
+
+	// for gun mux
+	gunTLSConfig *tls.Config
+	gunConfig    *gun.Config
+	transport    *http2.Transport
 }
 
 type VmessOption struct {
@@ -32,6 +41,8 @@ type VmessOption struct {
 	UDP            bool              `proxy:"udp,omitempty"`
 	Network        string            `proxy:"network,omitempty"`
 	HTTPOpts       HTTPOptions       `proxy:"http-opts,omitempty"`
+	HTTP2Opts      HTTP2Options      `proxy:"h2-opts,omitempty"`
+	GrpcOpts       GrpcOptions       `proxy:"grpc-opts,omitempty"`
 	WSPath         string            `proxy:"ws-path,omitempty"`
 	WSHeaders      map[string]string `proxy:"ws-headers,omitempty"`
 	SkipCertVerify bool              `proxy:"skip-cert-verify,omitempty"`
@@ -44,6 +55,16 @@ type HTTPOptions struct {
 	Headers map[string][]string `proxy:"headers,omitempty"`
 }
 
+type HTTP2Options struct {
+	Host []string `proxy:"host,omitempty"`
+	Path string   `proxy:"path,omitempty"`
+}
+
+type GrpcOptions struct {
+	GrpcServiceName string `proxy:"grpc-service-name,omitempty"`
+}
+
+// StreamConn implements C.ProxyAdapter
 func (v *Vmess) StreamConn(c net.Conn, metadata *C.Metadata) (net.Conn, error) {
 	var err error
 	switch v.option.Network {
@@ -71,6 +92,25 @@ func (v *Vmess) StreamConn(c net.Conn, metadata *C.Metadata) (net.Conn, error) {
 		}
 		c, err = vmess.StreamWebsocketConn(c, wsOpts)
 	case "http":
+		// readability first, so just copy default TLS logic
+		if v.option.TLS {
+			host, _, _ := net.SplitHostPort(v.addr)
+			tlsOpts := &vmess.TLSConfig{
+				Host:           host,
+				SkipCertVerify: v.option.SkipCertVerify,
+				SessionCache:   getClientSessionCache(),
+			}
+
+			if v.option.ServerName != "" {
+				tlsOpts.Host = v.option.ServerName
+			}
+
+			c, err = vmess.StreamTLSConn(c, tlsOpts)
+			if err != nil {
+				return nil, err
+			}
+		}
+
 		host, _, _ := net.SplitHostPort(v.addr)
 		httpOpts := &vmess.HTTPConfig{
 			Host:    host,
@@ -80,6 +120,32 @@ func (v *Vmess) StreamConn(c net.Conn, metadata *C.Metadata) (net.Conn, error) {
 		}
 
 		c = vmess.StreamHTTPConn(c, httpOpts)
+	case "h2":
+		host, _, _ := net.SplitHostPort(v.addr)
+		tlsOpts := vmess.TLSConfig{
+			Host:           host,
+			SkipCertVerify: v.option.SkipCertVerify,
+			SessionCache:   getClientSessionCache(),
+			NextProtos:     []string{"h2"},
+		}
+
+		if v.option.ServerName != "" {
+			tlsOpts.Host = v.option.ServerName
+		}
+
+		c, err = vmess.StreamTLSConn(c, &tlsOpts)
+		if err != nil {
+			return nil, err
+		}
+
+		h2Opts := &vmess.H2Config{
+			Hosts: v.option.HTTP2Opts.Host,
+			Path:  v.option.HTTP2Opts.Path,
+		}
+
+		c, err = vmess.StreamH2Conn(c, h2Opts)
+	case "grpc":
+		c, err = gun.StreamGunWithConn(c, v.gunTLSConfig, v.gunConfig)
 	default:
 		// handle TLS
 		if v.option.TLS {
@@ -105,19 +171,38 @@ func (v *Vmess) StreamConn(c net.Conn, metadata *C.Metadata) (net.Conn, error) {
 	return v.client.StreamConn(c, parseVmessAddr(metadata))
 }
 
-func (v *Vmess) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, error) {
+// DialContext implements C.ProxyAdapter
+func (v *Vmess) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.Conn, err error) {
+	// gun transport
+	if v.transport != nil {
+		c, err := gun.StreamGunWithTransport(v.transport, v.gunConfig)
+		if err != nil {
+			return nil, err
+		}
+		defer safeConnClose(c, err)
+
+		c, err = v.client.StreamConn(c, parseVmessAddr(metadata))
+		if err != nil {
+			return nil, err
+		}
+
+		return NewConn(c, v), nil
+	}
+
 	c, err := dialer.DialContext(ctx, "tcp", v.addr)
 	if err != nil {
 		return nil, fmt.Errorf("%s connect error: %s", v.addr, err.Error())
 	}
 	tcpKeepAlive(c)
+	defer safeConnClose(c, err)
 
 	c, err = v.StreamConn(c, metadata)
 	return NewConn(c, v), err
 }
 
-func (v *Vmess) DialUDP(metadata *C.Metadata) (C.PacketConn, error) {
-	// vmess use stream-oriented udp, so clash needs a net.UDPAddr
+// DialUDP implements C.ProxyAdapter
+func (v *Vmess) DialUDP(metadata *C.Metadata) (_ C.PacketConn, err error) {
+	// vmess use stream-oriented udp with a special address, so we needs a net.UDPAddr
 	if !metadata.Resolved() {
 		ip, err := resolver.ResolveIP(metadata.Host)
 		if err != nil {
@@ -126,17 +211,33 @@ func (v *Vmess) DialUDP(metadata *C.Metadata) (C.PacketConn, error) {
 		metadata.DstIP = ip
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), tcpTimeout)
-	defer cancel()
-	c, err := dialer.DialContext(ctx, "tcp", v.addr)
-	if err != nil {
-		return nil, fmt.Errorf("%s connect error: %s", v.addr, err.Error())
+	var c net.Conn
+	// gun transport
+	if v.transport != nil {
+		c, err = gun.StreamGunWithTransport(v.transport, v.gunConfig)
+		if err != nil {
+			return nil, err
+		}
+		defer safeConnClose(c, err)
+
+		c, err = v.client.StreamConn(c, parseVmessAddr(metadata))
+	} else {
+		ctx, cancel := context.WithTimeout(context.Background(), tcpTimeout)
+		defer cancel()
+		c, err = dialer.DialContext(ctx, "tcp", v.addr)
+		if err != nil {
+			return nil, fmt.Errorf("%s connect error: %s", v.addr, err.Error())
+		}
+		tcpKeepAlive(c)
+		defer safeConnClose(c, err)
+
+		c, err = v.StreamConn(c, metadata)
 	}
-	tcpKeepAlive(c)
-	c, err = v.StreamConn(c, metadata)
+
 	if err != nil {
 		return nil, fmt.Errorf("new vmess client error: %v", err)
 	}
+
 	return newPacketConn(&vmessPacketConn{Conn: c, rAddr: metadata.UDPAddr()}, v), nil
 }
 
@@ -148,21 +249,66 @@ func NewVmess(option VmessOption) (*Vmess, error) {
 		Security: security,
 		HostName: option.Server,
 		Port:     strconv.Itoa(option.Port),
+		IsAead:   option.AlterID == 0,
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	return &Vmess{
+	switch option.Network {
+	case "h2", "grpc":
+		if !option.TLS {
+			return nil, fmt.Errorf("TLS must be true with h2/grpc network")
+		}
+	}
+
+	v := &Vmess{
 		Base: &Base{
 			name: option.Name,
 			addr: net.JoinHostPort(option.Server, strconv.Itoa(option.Port)),
 			tp:   C.Vmess,
-			udp:  true,
+			udp:  option.UDP,
 		},
 		client: client,
 		option: &option,
-	}, nil
+	}
+
+	switch option.Network {
+	case "h2":
+		if len(option.HTTP2Opts.Host) == 0 {
+			option.HTTP2Opts.Host = append(option.HTTP2Opts.Host, "www.example.com")
+		}
+	case "grpc":
+		dialFn := func(network, addr string) (net.Conn, error) {
+			c, err := dialer.DialContext(context.Background(), "tcp", v.addr)
+			if err != nil {
+				return nil, fmt.Errorf("%s connect error: %s", v.addr, err.Error())
+			}
+			tcpKeepAlive(c)
+			return c, nil
+		}
+
+		gunConfig := &gun.Config{
+			ServiceName: v.option.GrpcOpts.GrpcServiceName,
+			Host:        v.option.ServerName,
+		}
+		tlsConfig := &tls.Config{
+			InsecureSkipVerify: v.option.SkipCertVerify,
+			ServerName:         v.option.ServerName,
+		}
+
+		if v.option.ServerName == "" {
+			host, _, _ := net.SplitHostPort(v.addr)
+			tlsConfig.ServerName = host
+			gunConfig.Host = host
+		}
+
+		v.gunTLSConfig = tlsConfig
+		v.gunConfig = gunConfig
+		v.transport = gun.NewHTTP2Client(dialFn, tlsConfig)
+	}
+
+	return v, nil
 }
 
 func parseVmessAddr(metadata *C.Metadata) *vmess.DstAddr {

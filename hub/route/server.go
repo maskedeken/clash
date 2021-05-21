@@ -9,9 +9,9 @@ import (
 
 	C "github.com/Dreamacro/clash/constant"
 	"github.com/Dreamacro/clash/log"
-	T "github.com/Dreamacro/clash/tunnel"
+	"github.com/Dreamacro/clash/tunnel/statistic"
 
-	"github.com/go-chi/chi"
+	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/cors"
 	"github.com/go-chi/render"
 	"github.com/gorilla/websocket"
@@ -143,7 +143,7 @@ func traffic(w http.ResponseWriter, r *http.Request) {
 
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
-	t := T.DefaultManager
+	t := statistic.DefaultManager
 	buf := &bytes.Buffer{}
 	var err error
 	for range tick.C {

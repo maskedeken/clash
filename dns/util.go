@@ -142,3 +142,29 @@ func transform(servers []NameServer, resolver *Resolver) []dnsClient {
 	}
 	return ret
 }
+
+func handleMsgWithEmptyAnswer(r *D.Msg) *D.Msg {
+	msg := &D.Msg{}
+	msg.Answer = []D.RR{}
+
+	msg.SetRcode(r, D.RcodeSuccess)
+	msg.Authoritative = true
+	msg.RecursionAvailable = true
+
+	return msg
+}
+
+func msgToIP(msg *D.Msg) []net.IP {
+	ips := []net.IP{}
+
+	for _, answer := range msg.Answer {
+		switch ans := answer.(type) {
+		case *D.AAAA:
+			ips = append(ips, ans.AAAA)
+		case *D.A:
+			ips = append(ips, ans.A)
+		}
+	}
+
+	return ips
+}

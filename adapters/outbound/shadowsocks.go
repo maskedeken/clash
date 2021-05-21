@@ -40,7 +40,7 @@ type ShadowSocksOption struct {
 }
 
 type simpleObfsOption struct {
-	Mode string `obfs:"mode"`
+	Mode string `obfs:"mode,omitempty"`
 	Host string `obfs:"host,omitempty"`
 }
 
@@ -54,6 +54,7 @@ type v2rayObfsOption struct {
 	Mux            bool              `obfs:"mux,omitempty"`
 }
 
+// StreamConn implements C.ProxyAdapter
 func (ss *ShadowSocks) StreamConn(c net.Conn, metadata *C.Metadata) (net.Conn, error) {
 	switch ss.obfsMode {
 	case "tls":
@@ -73,17 +74,21 @@ func (ss *ShadowSocks) StreamConn(c net.Conn, metadata *C.Metadata) (net.Conn, e
 	return c, err
 }
 
-func (ss *ShadowSocks) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, error) {
+// DialContext implements C.ProxyAdapter
+func (ss *ShadowSocks) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.Conn, err error) {
 	c, err := dialer.DialContext(ctx, "tcp", ss.addr)
 	if err != nil {
 		return nil, fmt.Errorf("%s connect error: %w", ss.addr, err)
 	}
 	tcpKeepAlive(c)
 
+	defer safeConnClose(c, err)
+
 	c, err = ss.StreamConn(c, metadata)
 	return NewConn(c, ss), err
 }
 
+// DialUDP implements C.ProxyAdapter
 func (ss *ShadowSocks) DialUDP(metadata *C.Metadata) (C.PacketConn, error) {
 	pc, err := dialer.ListenPacket("udp", "")
 	if err != nil {
@@ -92,6 +97,7 @@ func (ss *ShadowSocks) DialUDP(metadata *C.Metadata) (C.PacketConn, error) {
 
 	addr, err := resolveUDPAddr("udp", ss.addr)
 	if err != nil {
+		pc.Close()
 		return nil, err
 	}
 
@@ -99,6 +105,7 @@ func (ss *ShadowSocks) DialUDP(metadata *C.Metadata) (C.PacketConn, error) {
 	return newPacketConn(&ssPacketConn{PacketConn: pc, rAddr: addr}, ss), nil
 }
 
+// MarshalJSON implements C.ProxyAdapter
 func (ss *ShadowSocks) MarshalJSON() ([]byte, error) {
 	return json.Marshal(map[string]string{
 		"type": ss.Type().String(),

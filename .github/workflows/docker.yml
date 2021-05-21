@@ -17,37 +17,60 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v1
+        with:
+          platforms: all
+
       - name: Set up docker buildx
         id: buildx
-        uses: crazy-max/ghaction-docker-buildx@v2
+        uses: docker/setup-buildx-action@v1
         with:
-          buildx-version: latest
-          skip-cache: false
-          qemu-version: latest
+          version: latest
 
-      - name: Docker login
-        env:
-          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
-          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
-        run: |
-          echo "${DOCKER_PASSWORD}" | docker login --username "${DOCKER_USERNAME}" --password-stdin
+      - name: Login to DockerHub
+        uses: docker/login-action@v1
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
       
-      - name: Docker buildx image and push on dev branch
-        if: github.ref == 'refs/heads/dev'
-        run: |
-          docker buildx build --output "type=image,push=true" --platform=linux/amd64,linux/arm/v7,linux/arm64 --tag dreamacro/clash:dev .
+      - name: Login to Github Package
+        uses: docker/login-action@v1
+        with:
+          registry: ghcr.io
+          username: Dreamacro
+          password: ${{ secrets.PACKAGE_TOKEN }}
 
-      - name: Replace tag without `v`
+      - name: Build dev branch and push
+        if: github.ref == 'refs/heads/dev'
+        uses: docker/build-push-action@v2
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm/v7,linux/arm64
+          push: true
+          tags: 'dreamacro/clash:dev,ghcr.io/dreamacro/clash:dev'
+
+      - name: Get all docker tags
         if: startsWith(github.ref, 'refs/tags/')
-        uses: actions/github-script@v1
-        id: version
+        uses: actions/github-script@v3
+        id: tags
         with:
           script: |
-            return context.payload.ref.replace(/\/?refs\/tags\/v/, '')
+            const ref = `${context.payload.ref.replace(/\/?refs\/tags\//, '')}`
+            const tags = [
+              'dreamacro/clash:latest',
+              `dreamacro/clash:${ref}`,
+              'ghcr.io/dreamacro/clash:latest',
+              `ghcr.io/dreamacro/clash:${ref}`
+            ]
+            return tags.join(',')
           result-encoding: string
 
-      - name: Docker buildx image and push on release
+      - name: Build release and push
         if: startsWith(github.ref, 'refs/tags/')
-        run: |
-          docker buildx build --output "type=image,push=true" --platform=linux/amd64,linux/arm/v7,linux/arm64 --tag dreamacro/clash:${{steps.version.outputs.result}} .
-          docker buildx build --output "type=image,push=true" --platform=linux/amd64,linux/arm/v7,linux/arm64 --tag dreamacro/clash:latest .
+        uses: docker/build-push-action@v2
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm/v7,linux/arm64
+          push: true
+          tags: ${{steps.tags.outputs.result}}

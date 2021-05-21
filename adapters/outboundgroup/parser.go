@@ -12,25 +12,28 @@ import (
 var (
 	errFormat            = errors.New("format error")
 	errType              = errors.New("unsupport type")
-	errMissUse           = errors.New("`use` field should not be empty")
 	errMissProxy         = errors.New("`use` or `proxies` missing")
 	errMissHealthCheck   = errors.New("`url` or `interval` missing")
 	errDuplicateProvider = errors.New("`duplicate provider name")
 )
 
 type GroupCommonOption struct {
-	Name     string   `group:"name"`
-	Type     string   `group:"type"`
-	Proxies  []string `group:"proxies,omitempty"`
-	Use      []string `group:"use,omitempty"`
-	URL      string   `group:"url,omitempty"`
-	Interval int      `group:"interval,omitempty"`
+	Name       string   `group:"name"`
+	Type       string   `group:"type"`
+	Proxies    []string `group:"proxies,omitempty"`
+	Use        []string `group:"use,omitempty"`
+	URL        string   `group:"url,omitempty"`
+	Interval   int      `group:"interval,omitempty"`
+	Lazy       bool     `group:"lazy,omitempty"`
+	DisableUDP bool     `group:"disable-udp,omitempty"`
 }
 
 func ParseProxyGroup(config map[string]interface{}, proxyMap map[string]C.Proxy, providersMap map[string]provider.ProxyProvider) (C.ProxyAdapter, error) {
 	decoder := structure.NewDecoder(structure.Option{TagName: "group", WeaklyTypedInput: true})
 
-	groupOption := &GroupCommonOption{}
+	groupOption := &GroupCommonOption{
+		Lazy: true,
+	}
 	if err := decoder.Decode(config, groupOption); err != nil {
 		return nil, errFormat
 	}
@@ -55,7 +58,7 @@ func ParseProxyGroup(config map[string]interface{}, proxyMap map[string]C.Proxy,
 
 		// if Use not empty, drop health check options
 		if len(groupOption.Use) != 0 {
-			hc := provider.NewHealthCheck(ps, "", 0)
+			hc := provider.NewHealthCheck(ps, "", 0, true)
 			pd, err := provider.NewCompatibleProvider(groupName, ps, hc)
 			if err != nil {
 				return nil, err
@@ -63,9 +66,13 @@ func ParseProxyGroup(config map[string]interface{}, proxyMap map[string]C.Proxy,
 
 			providers = append(providers, pd)
 		} else {
+			if _, ok := providersMap[groupName]; ok {
+				return nil, errDuplicateProvider
+			}
+
 			// select don't need health check
 			if groupOption.Type == "select" || groupOption.Type == "relay" {
-				hc := provider.NewHealthCheck(ps, "", 0)
+				hc := provider.NewHealthCheck(ps, "", 0, true)
 				pd, err := provider.NewCompatibleProvider(groupName, ps, hc)
 				if err != nil {
 					return nil, err
@@ -78,7 +85,7 @@ func ParseProxyGroup(config map[string]interface{}, proxyMap map[string]C.Proxy,
 					return nil, errMissHealthCheck
 				}
 
-				hc := provider.NewHealthCheck(ps, groupOption.URL, uint(groupOption.Interval))
+				hc := provider.NewHealthCheck(ps, groupOption.URL, uint(groupOption.Interval), groupOption.Lazy)
 				pd, err := provider.NewCompatibleProvider(groupName, ps, hc)
 				if err != nil {
 					return nil, err
@@ -102,15 +109,16 @@ func ParseProxyGroup(config map[string]interface{}, proxyMap map[string]C.Proxy,
 	switch groupOption.Type {
 	case "url-test":
 		opts := parseURLTestOption(config)
-		group = NewURLTest(groupName, providers, opts...)
+		group = NewURLTest(groupOption, providers, opts...)
 	case "select":
-		group = NewSelector(groupName, providers)
+		group = NewSelector(groupOption, providers)
 	case "fallback":
-		group = NewFallback(groupName, providers)
+		group = NewFallback(groupOption, providers)
 	case "load-balance":
-		group = NewLoadBalance(groupName, providers)
+		strategy := parseStrategy(config)
+		return NewLoadBalance(groupOption, providers, strategy)
 	case "relay":
-		group = NewRelay(groupName, providers)
+		group = NewRelay(groupOption, providers)
 	default:
 		return nil, fmt.Errorf("%w: %s", errType, groupOption.Type)
 	}

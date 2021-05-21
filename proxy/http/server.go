@@ -16,19 +16,19 @@ import (
 	"github.com/Dreamacro/clash/tunnel"
 )
 
-type HttpListener struct {
+type HTTPListener struct {
 	net.Listener
 	address string
 	closed  bool
 	cache   *cache.Cache
 }
 
-func NewHttpProxy(addr string) (*HttpListener, error) {
+func NewHTTPProxy(addr string) (*HTTPListener, error) {
 	l, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, err
 	}
-	hl := &HttpListener{l, addr, false, cache.New(30 * time.Second)}
+	hl := &HTTPListener{l, addr, false, cache.New(30 * time.Second)}
 
 	go func() {
 		log.Infoln("HTTP proxy listening at: %s", addr)
@@ -48,18 +48,19 @@ func NewHttpProxy(addr string) (*HttpListener, error) {
 	return hl, nil
 }
 
-func (l *HttpListener) Close() {
+func (l *HTTPListener) Close() {
 	l.closed = true
 	l.Listener.Close()
 }
 
-func (l *HttpListener) Address() string {
+func (l *HTTPListener) Address() string {
 	return l.address
 }
 
 func canActivate(loginStr string, authenticator auth.Authenticator, cache *cache.Cache) (ret bool) {
 	if result := cache.Get(loginStr); result != nil {
 		ret = result.(bool)
+		return
 	}
 	loginData, err := base64.StdEncoding.DecodeString(loginStr)
 	login := strings.Split(string(loginData), ":")
@@ -71,21 +72,29 @@ func canActivate(loginStr string, authenticator auth.Authenticator, cache *cache
 
 func HandleConn(conn net.Conn, cache *cache.Cache) {
 	br := bufio.NewReader(conn)
+
+keepAlive:
 	request, err := http.ReadRequest(br)
 	if err != nil || request.URL.Host == "" {
 		conn.Close()
 		return
 	}
 
+	keepAlive := strings.TrimSpace(strings.ToLower(request.Header.Get("Proxy-Connection"))) == "keep-alive"
 	authenticator := authStore.Authenticator()
 	if authenticator != nil {
 		if authStrings := strings.Split(request.Header.Get("Proxy-Authorization"), " "); len(authStrings) != 2 {
-			_, err = conn.Write([]byte("HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic\r\n\r\n"))
-			conn.Close()
+			conn.Write([]byte("HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic\r\n\r\n"))
+			if keepAlive {
+				goto keepAlive
+			}
 			return
 		} else if !canActivate(authStrings[1], authenticator, cache) {
 			conn.Write([]byte("HTTP/1.1 403 Forbidden\r\n\r\n"))
 			log.Infoln("Auth failed from %s", conn.RemoteAddr().String())
+			if keepAlive {
+				goto keepAlive
+			}
 			conn.Close()
 			return
 		}
@@ -94,6 +103,7 @@ func HandleConn(conn net.Conn, cache *cache.Cache) {
 	if request.Method == http.MethodConnect {
 		_, err := conn.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\n"))
 		if err != nil {
+			conn.Close()
 			return
 		}
 		tunnel.Add(adapters.NewHTTPS(request, conn))
