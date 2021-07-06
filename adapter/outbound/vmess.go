@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 
@@ -77,18 +76,6 @@ func (v *Vmess) StreamConn(c net.Conn, metadata *C.Metadata) (net.Conn, error) {
 			Path: v.option.WSPath,
 		}
 
-		var ed uint32
-		if u, err := url.Parse(v.option.WSPath); err == nil {
-			if q := u.Query(); q.Get("ed") != "" {
-				Ed, _ := strconv.Atoi(q.Get("ed"))
-				ed = uint32(Ed)
-				q.Del("ed")
-				u.RawQuery = q.Encode()
-				wsOpts.Path = u.String()
-			}
-		}
-		wsOpts.Ed = ed
-
 		if len(v.option.WSHeaders) != 0 {
 			header := http.Header{}
 			for key, value := range v.option.WSHeaders {
@@ -102,11 +89,7 @@ func (v *Vmess) StreamConn(c net.Conn, metadata *C.Metadata) (net.Conn, error) {
 			wsOpts.SkipCertVerify = v.option.SkipCertVerify
 			wsOpts.ServerName = v.option.ServerName
 		}
-		if wsOpts.Ed > 0 {
-			c, err = vmess.StreamWebsocketEDConn(c, wsOpts)
-		} else {
-			c, err = vmess.StreamWebsocketConn(c, wsOpts, nil)
-		}
+		c, err = vmess.StreamWebsocketConn(c, wsOpts)
 	case "http":
 		// readability first, so just copy default TLS logic
 		if v.option.TLS {

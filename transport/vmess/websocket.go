@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -36,6 +37,7 @@ type websocketEDConn struct {
 	cancel   context.CancelFunc
 	ctx      context.Context
 	config   *WebsocketConfig
+	ed       uint32
 }
 
 type WebsocketConfig struct {
@@ -46,7 +48,6 @@ type WebsocketConfig struct {
 	TLS            bool
 	SkipCertVerify bool
 	ServerName     string
-	Ed             uint32
 }
 
 // Read implements net.Conn.Read()
@@ -128,18 +129,6 @@ func (wsc *websocketConn) SetWriteDeadline(t time.Time) error {
 	return wsc.conn.SetWriteDeadline(t)
 }
 
-func StreamWebsocketEDConn(conn net.Conn, c *WebsocketConfig) (net.Conn, error) {
-	ctx, cancel := context.WithCancel(context.Background())
-	conn = &websocketEDConn{
-		dialed:   make(chan bool, 1),
-		cancel:   cancel,
-		ctx:      ctx,
-		realConn: conn,
-		config:   c,
-	}
-	return conn, nil
-}
-
 func (wsedc *websocketEDConn) Close() error {
 	wsedc.closed = true
 	wsedc.cancel()
@@ -155,11 +144,11 @@ func (wsedc *websocketEDConn) Write(b []byte) (int, error) {
 	}
 	if wsedc.Conn == nil {
 		ed := b
-		if len(ed) > int(wsedc.config.Ed) {
+		if len(ed) > int(wsedc.ed) {
 			ed = nil
 		}
 		var err error
-		if wsedc.Conn, err = StreamWebsocketConn(wsedc.realConn, wsedc.config, ed); err != nil {
+		if wsedc.Conn, err = streamWebsocketEDConn(wsedc.realConn, wsedc.config, ed); err != nil {
 			wsedc.Close()
 			return 0, errors.New("failed to dial WebSocket: " + err.Error())
 		}
@@ -220,7 +209,34 @@ func (wsedc *websocketEDConn) SetWriteDeadline(t time.Time) error {
 	return wsedc.Conn.SetWriteDeadline(t)
 }
 
-func StreamWebsocketConn(conn net.Conn, c *WebsocketConfig, ed []byte) (net.Conn, error) {
+func StreamWebsocketConn(conn net.Conn, c *WebsocketConfig) (net.Conn, error) {
+	var ed uint32
+	if u, err := url.Parse(c.Path); err == nil {
+		if q := u.Query(); q.Get("ed") != "" {
+			Ed, _ := strconv.Atoi(q.Get("ed"))
+			ed = uint32(Ed)
+			q.Del("ed")
+			u.RawQuery = q.Encode()
+			c.Path = u.String()
+		}
+	}
+
+	if ed > 0 {
+		ctx, cancel := context.WithCancel(context.Background())
+		return &websocketEDConn{
+			dialed:   make(chan bool, 1),
+			cancel:   cancel,
+			ctx:      ctx,
+			realConn: conn,
+			config:   c,
+			ed:       ed,
+		}, nil
+	}
+
+	return streamWebsocketEDConn(conn, c, nil)
+}
+
+func streamWebsocketEDConn(conn net.Conn, c *WebsocketConfig, ed []byte) (net.Conn, error) {
 	dialer := &websocket.Dialer{
 		NetDial: func(network, addr string) (net.Conn, error) {
 			return conn, nil
